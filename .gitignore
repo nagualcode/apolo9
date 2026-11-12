@@ -1,0 +1,5 @@
+target/
+*.DS_Store
+renders/
+# SOMA's DIY documentation, manuals and PCB artwork: studied, not redistributed.
+reference/

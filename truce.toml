@@ -1,0 +1,22 @@
+[vendor]
+name = "Jardim Sonoro"
+id = "com.jardimsonoro"
+url = "https://github.com/nagualcode/apolo9"
+au_manufacturer = "JdSn"
+
+[[plugin]]
+name = "Apolo9"
+bundle_id = "apolo9"
+crate = "apolo9"
+category = "instrument"
+description = """
+Circuit-level model of the SOMA Lyra-8 organismic synthesizer: eight \
+CD4093 Schmitt-trigger voices with skin-conductance envelopes, FM \
+cross-modulation, Hyper LFO, a dual PT2399 sigma-delta mod delay and \
+op-amp distortion, with every parasitic coupling left in.
+"""
+fourcc = "Apl9"
+au3_subtype = "Ap93"
+au_tag = "Synthesizer"
+vst3_subcategory = "Synth"
+au3_name = "Apolo9 (AUv3)"
