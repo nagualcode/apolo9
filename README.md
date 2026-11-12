@@ -10,11 +10,12 @@ AU · VST3 · CLAP · standalone — macOS (Apple Silicon), Windows, Linux.
 
 ## What is it, exactly?
 
-Apolo9 is a circuit-level model of the SOMA Laboratory **Lyra-8**, the Russian "organismic"
-synthesizer that Vlad Kreimer built on the principle that an instrument should behave less
-like a machine and more like a small, opinionated animal.
+Apolo9 is a circuit-level model of an **organismic synthesizer**: the kind of experimental,
+DIY instrument that tinkerers build from logic chips, touch plates and a soldering iron, on the
+principle that an instrument should behave less like a machine and more like a small,
+opinionated animal.
 
-The Lyra has no oscillators in the polite sense. It has eight CMOS logic gates, abused as
+It has no oscillators in the polite sense. It has eight CMOS logic gates, abused as
 Schmitt triggers, charging and discharging capacitors. It has no envelope generators either,
 in the polite sense: it has your finger, closing a circuit through your skin, so the attack
 depends on how hard you press, how damp you are and, the manual insists, your emotional state.
@@ -75,7 +76,7 @@ without a host.
 4. Turn a **TUNE** knob while a voice sounds. There are no notes on it. Find one.
 5. Now set the four **MOD SOURCE** switches up (to the numbers) and play two neighbouring
    keys. Listen to them bend each other. Congratulations: you are doing FM synthesis with
-   your fingers, as the Soviet Union intended.
+   your fingers, as the tinkerers intended.
 
 ---
 
@@ -131,7 +132,7 @@ Two slow oscillators, **A** and **B**, combined.
 | **AND / OR** | AND: the LFO is high only when both are. OR: the two square waves are added into a three-step staircase. |
 | **LINK** | A feeds gently into B's timing, so the two stop being strangers. |
 
-Its square edges click a little. On the hardware they do too, and Vlad Kreimer calls them
+Its square edges click a little. On the hardware they do too, and its designer calls them
 "the only noise I don't like". We kept them out of respect.
 
 ### Mod Delay
@@ -182,12 +183,12 @@ rainy evening or a different unit.
 
 ## The presets
 
-Nineteen factory presets, in three drawers. The SOMA sheets leave the tuning to you ("set a
+Nineteen factory presets, in three drawers. The classic sheets leave the tuning to you ("set a
 beautiful scale by the TUNE knobs"); Apolo9 fills it in with a scale computed from the
 circuit model, so they sound musical the moment you load them.
 
-**SOMA**: the seven official preset sheets SOMA Laboratory published for the Lyra-8, knob
-for knob:
+**Classic sheets**: seven preset sheets that circulate with the original instrument, recreated
+knob for knob:
 
 | Preset | What it is |
 |---|---|
@@ -237,10 +238,10 @@ instrument. This is the point. Embrace it, or bring a tuner.
 The PT2399 stores sound as bits, and at long times it has too few of them per second. Apolo9
 simulates that bitstream rather than pretending it isn't there.
 
-**Is this exactly the Lyra-8?**
+**Is this exactly the original?**
 It is as close as the available evidence allows. There is no public schematic, so parts of
-the circuit were reconstructed from the board artwork, the parts list, SOMA's own notes and
-the behaviour described in the manual. Every claim, and how sure we are of it, is written
+the circuit were reconstructed from the DIY board artwork, the parts list, the builders' notes
+and the behaviour described in the manual. Every claim, and how sure we are of it, is written
 down in [docs/CIRCUIT.md](docs/CIRCUIT.md).
 
 **Where is the EXT IN jack?**
@@ -274,7 +275,7 @@ pluginval at strictness 10.
 
 MIT. See [LICENSE](LICENSE).
 
-Not affiliated with SOMA Laboratory. Lyra-8 is a trademark of its owner, named here only to
-describe what this project models.
+An independent study of experimental DIY circuits. Not affiliated with any manufacturer;
+product names in the technical notes are trademarks of their owners.
 
 *Jardim Sonoro · Rio de Janeiro · 2026. Touch gently.*
