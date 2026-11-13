@@ -16,6 +16,7 @@
 //! The square output is band-limited with a polyBLEP residual (one sample of
 //! look-ahead latency, applied to the triangle too so both stay aligned).
 
+use super::fexp;
 use super::tolerance::GateSpread;
 
 /// HEF4093B transfer thresholds as a function of supply (typical curves of
@@ -56,6 +57,18 @@ impl Norton {
     }
 }
 
+/// Per-control-period constants of the timing node (see `SchmittOsc::coef`).
+#[derive(Clone, Copy, Default)]
+pub struct OscCoef {
+    /// Gate output → node conductance.
+    pub g_out: f64,
+    /// Total conductance on the node and its reciprocal.
+    pub g: f64,
+    pub inv_g: f64,
+    /// Decay factor of the node over one full step.
+    pub e_full: f64,
+}
+
 #[derive(Clone, Copy, Default)]
 pub struct OscOut {
     /// Capacitor ("triangle") voltage, volts.
@@ -77,20 +90,26 @@ pub struct SchmittOsc {
     pub c_da: f64,
     pub g_da: f64,
     pub v_da: f64,
+    inv_c: f64,
+    k_da: f64,
     sq_prev: f64,
     tri_prev: f64,
 }
 
 impl SchmittOsc {
     pub fn new(c: f64, electrolytic: bool) -> Self {
+        let c_da = c * if electrolytic { 0.03 } else { 0.002 };
+        let g_da = 1.0 / 2.0e6;
         Self {
             vc: 0.0,
             high: true,
             c,
             g_leak: if electrolytic { 1.0 / 25e6 } else { 1.0 / 2e9 },
-            c_da: c * if electrolytic { 0.03 } else { 0.002 },
-            g_da: 1.0 / 2.0e6,
+            c_da,
+            g_da,
             v_da: 0.0,
+            inv_c: 1.0 / c,
+            k_da: g_da / c_da,
             sq_prev: 1.0,
             tri_prev: 0.0,
         }
@@ -104,6 +123,13 @@ impl SchmittOsc {
         self.tri_prev = vc;
     }
 
+    /// Coefficients that only change when a knob or the envelope moves.
+    #[inline]
+    pub fn coef(&self, dt: f64, g_out: f64, g_net: f64) -> OscCoef {
+        let g = g_out + g_net + self.g_leak + self.g_da;
+        OscCoef { g_out, g, inv_g: 1.0 / g, e_full: fexp(-dt * g * self.inv_c) }
+    }
+
     /// Advance by `dt` seconds.
     ///
     /// * `v_hi` – output-high level (the package supply);
@@ -112,8 +138,15 @@ impl SchmittOsc {
     /// * `net` – everything else tied to the node.
     #[inline]
     pub fn step(&mut self, dt: f64, v_hi: f64, g_out: f64, vt_hi: f64, vt_lo: f64, net: Norton) -> OscOut {
-        let g_rest = net.g + self.g_leak + self.g_da;
-        let i_rest = net.i + self.g_da * self.v_da;
+        let k = self.coef(dt, g_out, net.g);
+        self.step_k(dt, v_hi, &k, vt_hi, vt_lo, net.i)
+    }
+
+    /// Same, with the conductances prepared by [`Self::coef`] (for the same
+    /// `dt`) and only the injected current `i_net` changing per sample.
+    #[inline]
+    pub fn step_k(&mut self, dt: f64, v_hi: f64, k: &OscCoef, vt_hi: f64, vt_lo: f64, i_net: f64) -> OscOut {
+        let i_rest = i_net + self.g_da * self.v_da;
         let mut t_left = dt;
         let mut edges = 0i32;
         // BLEP residuals: correction for the previous (not yet emitted) and
@@ -121,52 +154,46 @@ impl SchmittOsc {
         let mut corr_prev = 0.0;
         let mut corr_now = 0.0;
 
+        let inv_c = self.inv_c;
         for _ in 0..8 {
             let v_out = if self.high { v_hi } else { 0.0 };
-            let g = g_out + g_rest;
-            let v_inf = (g_out * v_out + i_rest) / g;
-            let tau = self.c / g;
-            let (vt, crossing) = if self.high {
-                (vt_hi, v_inf > vt_hi)
-            } else {
-                (vt_lo, v_inf < vt_lo)
-            };
+            let v_inf = (k.g_out * v_out + i_rest) * k.inv_g;
+            let vt = if self.high { vt_hi } else { vt_lo };
             let already_past = if self.high { self.vc >= vt } else { self.vc <= vt };
-            let t_cross = if already_past {
-                Some(0.0)
-            } else if crossing {
-                let ratio = (self.vc - v_inf) / (vt - v_inf);
-                if ratio > 1.0 { Some(tau * ratio.ln()) } else { Some(0.0) }
+            // Free run to the end of the step; a crossing is only solved
+            // for (one logarithm) when this run would pass the threshold.
+            let e = if t_left == dt { k.e_full } else { fexp(-t_left * k.g * inv_c) };
+            let v_end = v_inf + (self.vc - v_inf) * e;
+            let passes = if self.high { v_end >= vt } else { v_end <= vt };
+            if !already_past && !passes {
+                self.vc = v_end;
+                break;
+            }
+            let tc = if already_past {
+                0.0
             } else {
-                None
+                let ratio = (self.vc - v_inf) / (vt - v_inf);
+                if ratio > 1.0 { (ratio.ln() / (k.g * inv_c)).min(t_left) } else { 0.0 }
             };
-            match t_cross {
-                Some(tc) if tc <= t_left => {
-                    // Move to the crossing, flip the output.
-                    if tc > 0.0 {
-                        self.vc = vt;
-                    }
-                    t_left -= tc;
-                    let h = if self.high { -2.0 } else { 2.0 };
-                    self.high = !self.high;
-                    edges += if self.high { 1 } else { -1 };
-                    // Fraction of the step elapsed at the edge.
-                    let f = ((dt - t_left) / dt).clamp(0.0, 1.0);
-                    corr_prev += h * (1.0 - f) * (1.0 - f) * 0.5;
-                    corr_now -= h * f * f * 0.5;
-                    if t_left <= 0.0 {
-                        break;
-                    }
-                }
-                _ => {
-                    self.vc = v_inf + (self.vc - v_inf) * (-t_left / tau).exp();
-                    break;
-                }
+            // Move to the crossing, flip the output.
+            if tc > 0.0 {
+                self.vc = vt;
+            }
+            t_left -= tc;
+            let h = if self.high { -2.0 } else { 2.0 };
+            self.high = !self.high;
+            edges += if self.high { 1 } else { -1 };
+            // Fraction of the step elapsed at the edge.
+            let f = ((dt - t_left) / dt).clamp(0.0, 1.0);
+            corr_prev += h * (1.0 - f) * (1.0 - f) * 0.5;
+            corr_now -= h * f * f * 0.5;
+            if t_left <= 0.0 {
+                break;
             }
         }
 
         // Dielectric absorption charge (slow, explicit is fine).
-        self.v_da += self.g_da * (self.vc - self.v_da) / self.c_da * dt;
+        self.v_da += self.k_da * (self.vc - self.v_da) * dt;
 
         let sq_now = if self.high { 1.0 } else { -1.0 } + corr_now;
         let out = OscOut {
@@ -190,6 +217,7 @@ mod tests {
         let mut o = SchmittOsc::new(c, false);
         o.g_leak = 0.0;
         o.g_da = 0.0;
+        o.k_da = 0.0;
         o.reset(lo);
         let dt = 1.0 / fs;
         let mut rises = Vec::new();

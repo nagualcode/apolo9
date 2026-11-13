@@ -172,18 +172,68 @@ fn knob(ui: &mut egui::Ui, ctx: &Ctx, f: &Frame, pal: &Pal, id: P, label: &str, 
     }
 }
 
+/// Shared input for the toggle switches. The hit area covers the switch
+/// body and its legends; a click steps (2 positions) or picks the position
+/// under the pointer (3 positions), and a vertical swipe throws the lever
+/// one position per notch, like flicking the real toggle.
+/// `slot` is the lever position counted from the top. Returns the response
+/// and the newly requested slot, if any.
+fn toggle_input(ui: &mut egui::Ui, uid: egui::Id, f: &Frame, body: Rect, hit: Rect, slots: i32, slot: i32) -> (egui::Response, Option<i32>) {
+    let resp = ui.interact(hit, uid, Sense::click_and_drag()).on_hover_cursor(egui::CursorIcon::ResizeVertical);
+    let mut want = None;
+    if resp.drag_started() {
+        ui.data_mut(|d| d.insert_temp(uid, slot));
+    }
+    if resp.dragged() {
+        let start: i32 = ui.data(|d| d.get_temp(uid)).unwrap_or(slot);
+        let origin = ui.input(|i| i.pointer.press_origin());
+        if let (Some(o), Some(pos)) = (origin, resp.interact_pointer_pos()) {
+            let notch = f.len(11.0).max(6.0);
+            let moved = ((pos.y - o.y) / notch).round() as i32;
+            let to = (start + moved).clamp(0, slots - 1);
+            if to != slot {
+                want = Some(to);
+            }
+        }
+    } else if resp.clicked() {
+        if slots == 2 {
+            want = Some(1 - slot);
+        } else if let Some(pos) = resp.interact_pointer_pos() {
+            let t = ((pos.y - body.top()) / body.height()).clamp(0.0, 0.999);
+            let to = (t * slots as f32) as i32;
+            if to != slot {
+                want = Some(to);
+            }
+        }
+    }
+    (resp, want)
+}
+
+/// Switch body: slot, outline (brighter under the pointer).
+fn toggle_body(pt: &egui::Painter, f: &Frame, pal: &Pal, rect: Rect, hot: bool) {
+    pt.rect_filled(rect, CornerRadius::same(3), pal.board_hi);
+    let (w, c) = if hot { (1.8, pal.copper_hi) } else { (1.2, pal.copper) };
+    pt.rect_stroke(rect, CornerRadius::same(3), Stroke::new(f.len(w), c), StrokeKind::Inside);
+}
+
+/// Hit area of a switch with legends on its right.
+fn side_hit(f: &Frame, x: f32, y: f32, h: f32, longest: usize) -> Rect {
+    f.r(x - 9.0, y - 7.0, 36.0 + longest as f32 * 5.4, h + 14.0)
+}
+
 /// Two-position SMD slide switch for a bool parameter.
 fn switch2(ui: &mut egui::Ui, ctx: &Ctx, f: &Frame, pal: &Pal, id: P, label: &str, on_txt: &str, x: f32, y: f32) {
     let rect = f.r(x, y, 18.0, 34.0);
     let uid = ui.id().with(("sw2", u32::from(id)));
-    let resp = ui.interact(rect.expand(f.len(4.0)), uid, Sense::click());
     let on = ctx.get_param(id) > 0.5;
-    if resp.clicked() {
-        ctx.automate(id, if on { 0.0 } else { 1.0 });
+    // Body plus the legends above and below it.
+    let hit = f.r(x - 10.0, y - 14.0, 38.0, 68.0);
+    let (resp, want) = toggle_input(ui, uid, f, rect, hit, 2, i32::from(!on));
+    if let Some(slot) = want {
+        ctx.automate(id, if slot == 0 { 1.0 } else { 0.0 });
     }
     let pt = ui.painter();
-    pt.rect_filled(rect, CornerRadius::same(3), pal.board_hi);
-    pt.rect_stroke(rect, CornerRadius::same(3), Stroke::new(f.len(1.2), pal.copper), StrokeKind::Inside);
+    toggle_body(pt, f, pal, rect, resp.hovered() || resp.dragged());
     let knob_r = Rect::from_min_size(
         if on { f.p(x + 3.0, y + 3.0) } else { f.p(x + 3.0, y + 17.0) },
         vec2(f.len(12.0), f.len(14.0)),
@@ -201,23 +251,21 @@ fn switch3(ui: &mut egui::Ui, ctx: &Ctx, f: &Frame, pal: &Pal, id: P, labels: [&
     // matching the Lyra panel: up = voices, centre = off, down = LFO CV.
     let rect = f.r(x, y, 18.0, 48.0);
     let uid = ui.id().with(("sw3", u32::from(id)));
-    let resp = ui.interact(rect.expand(f.len(4.0)), uid, Sense::click());
     let idx = (ctx.get_param(id) * 2.0).round() as i32;
-    if resp.clicked() {
-        if let Some(pos) = resp.interact_pointer_pos() {
-            let t = (pos.y - rect.top()) / rect.height();
-            let want = if t < 0.36 { 1 } else if t > 0.64 { 2 } else { 0 };
-            ctx.automate(id, f64::from(want) / 2.0);
-        }
-    }
-    let slot = match idx {
-        1 => 0.0,
-        2 => 2.0,
-        _ => 1.0,
+    let slot_i = match idx {
+        1 => 0,
+        2 => 2,
+        _ => 1,
     };
+    let longest = labels.iter().map(|l| l.len()).max().unwrap_or(0);
+    let (resp, want) = toggle_input(ui, uid, f, rect, side_hit(f, x, y, 48.0, longest), 3, slot_i);
+    if let Some(to) = want {
+        let enum_idx = [1.0, 0.0, 2.0][to as usize];
+        ctx.automate(id, enum_idx / 2.0);
+    }
+    let slot = slot_i as f32;
     let pt = ui.painter();
-    pt.rect_filled(rect, CornerRadius::same(3), pal.board_hi);
-    pt.rect_stroke(rect, CornerRadius::same(3), Stroke::new(f.len(1.2), pal.copper), StrokeKind::Inside);
+    toggle_body(pt, f, pal, rect, resp.hovered() || resp.dragged());
     let kr = Rect::from_min_size(f.p(x + 3.0, y + 3.0 + slot * 14.0), vec2(f.len(12.0), f.len(14.0)));
     pt.rect_filled(kr, CornerRadius::same(2), if idx == 0 { pal.silk_dim } else { pal.trace_lit });
     for (k, (lbl, yy)) in [(labels[1], 0.0), (labels[0], 1.0), (labels[2], 2.0)].iter().enumerate() {
@@ -236,15 +284,15 @@ fn switch3(ui: &mut egui::Ui, ctx: &Ctx, f: &Frame, pal: &Pal, id: P, labels: [&
 fn switch_enum2(ui: &mut egui::Ui, ctx: &Ctx, f: &Frame, pal: &Pal, id: P, up: &str, down: &str, x: f32, y: f32) {
     let rect = f.r(x, y, 18.0, 34.0);
     let uid = ui.id().with(("swe", u32::from(id)));
-    let resp = ui.interact(rect.expand(f.len(4.0)), uid, Sense::click());
     // Index 1 is drawn up.
     let is_up = ctx.get_param(id) > 0.5;
-    if resp.clicked() {
-        ctx.automate(id, if is_up { 0.0 } else { 1.0 });
+    let hit = side_hit(f, x, y, 34.0, up.len().max(down.len()));
+    let (resp, want) = toggle_input(ui, uid, f, rect, hit, 2, i32::from(!is_up));
+    if let Some(slot) = want {
+        ctx.automate(id, if slot == 0 { 1.0 } else { 0.0 });
     }
     let pt = ui.painter();
-    pt.rect_filled(rect, CornerRadius::same(3), pal.board_hi);
-    pt.rect_stroke(rect, CornerRadius::same(3), Stroke::new(f.len(1.2), pal.copper), StrokeKind::Inside);
+    toggle_body(pt, f, pal, rect, resp.hovered() || resp.dragged());
     let kr = Rect::from_min_size(
         if is_up { f.p(x + 3.0, y + 3.0) } else { f.p(x + 3.0, y + 17.0) },
         vec2(f.len(12.0), f.len(14.0)),

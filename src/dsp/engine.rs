@@ -21,8 +21,8 @@ use super::dist::Distortion;
 use super::lfo::{HyperLfo, LfoCombine, VibratoBank};
 use super::resample::Decimator;
 use super::tolerance::Unit;
-use super::voice::{R_TUNE_POT, Voice, VoiceInputs};
-use super::{Rc, Rng, VBIAS, VDD, VOLTS_PER_FS, opamp_rail, sane, taper_a};
+use super::voice::{R_TUNE_POT, R_VIB, Voice, VoiceInputs};
+use super::{Rc, Rng, VBIAS, VDD, VOLTS_PER_FS, fexp, opamp_rail, sane, taper_a};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ModSrc {
@@ -163,9 +163,16 @@ impl Smooth {
 
     #[inline]
     fn approach(&mut self, t: &Self, a: f64) {
+        // Land exactly on the target once close: a knob resting at zero
+        // must not leave its smoother decaying into subnormals forever.
+        #[inline]
+        fn one(s: &mut f64, t: f64, a: f64) {
+            let d = t - *s;
+            *s = if d.abs() < 1e-9 { t } else { *s + a * d };
+        }
         fn arr<const N: usize>(s: &mut [f64; N], t: &[f64; N], a: f64) {
             for i in 0..N {
-                s[i] += a * (t[i] - s[i]);
+                one(&mut s[i], t[i], a);
             }
         }
         arr(&mut self.ln_r_tune, &t.ln_r_tune, a);
@@ -176,11 +183,11 @@ impl Smooth {
         arr(&mut self.ln_lfo_r, &t.ln_lfo_r, a);
         arr(&mut self.ln_time, &t.ln_time, a);
         arr(&mut self.dmod, &t.dmod, a);
-        self.fb += a * (t.fb - self.fb);
-        self.dmix += a * (t.dmix - self.dmix);
-        self.drive += a * (t.drive - self.drive);
-        self.dist_mix += a * (t.dist_mix - self.dist_mix);
-        self.vol += a * (t.vol - self.vol);
+        one(&mut self.fb, t.fb, a);
+        one(&mut self.dmix, t.dmix, a);
+        one(&mut self.drive, t.drive, a);
+        one(&mut self.dist_mix, t.dist_mix, a);
+        one(&mut self.vol, t.vol, a);
     }
 }
 
@@ -323,6 +330,7 @@ impl Engine {
 
     /// Render one host block. `ext`: EXT IN at host rate (mono).
     pub fn process(&mut self, c: &Controls, ext: Option<&[f32]>, out: &mut [f32]) {
+        let _ftz = super::NoDenormals::new();
         let targets = Smooth::targets(c);
         if !self.initialised {
             self.sm = targets;
@@ -337,6 +345,10 @@ impl Engine {
         // Threshold noise scaled so its spectral density is rate-independent.
         let vt_noise = 0.4e-3 * noise * (self.fs / 192_000.0).sqrt();
         let hiss = 0.30e-3 * noise * (self.fs * 0.5 / 20_000.0).sqrt();
+        // Thermal drift runs once per host sample: same pole and variance
+        // as an update on every internal sample.
+        let drift_pole = 0.999_995f64.powi(self.os as i32);
+        let drift_gain = 2.0e-6 * noise * (self.os as f64).sqrt();
         let lfo_mode = if c.lfo_and { LfoCombine::And } else { LfoCombine::Or };
         let dsrc = if c.cv_delay.is_some() {
             DelayModSource::Cv
@@ -357,23 +369,24 @@ impl Engine {
             let g_hum = h * h * h / (80e6 * self.unit.leak[i]);
             g_target[i] = g_touch + g_hum;
         }
-        let vib_scale: [f64; 8] = std::array::from_fn(|i| if i == 3 || i == 4 { 24.0 / 47.0 } else { 1.0 });
+        // Vibrato: AC-coupled, practically a current source.
+        let g_vib: [f64; 8] = std::array::from_fn(|i| 1.0 / (R_VIB * if i == 3 || i == 4 { 24.0 / 47.0 } else { 1.0 }));
         let fm_src: [usize; 4] = std::array::from_fn(|p| self.fm_source(p, c.fm_loop));
-        let r_fm: [f64; 8] = std::array::from_fn(|i| 2.2e3 * self.unit.fm_r[i]);
+        let g_fm: [f64; 8] = std::array::from_fn(|i| 1.0 / (2.2e3 * self.unit.fm_r[i]));
 
         for (n, o) in out.iter_mut().enumerate() {
             // ===== Control rate (host sample) ===========================
             self.sm.approach(&targets, a);
             let sm = self.sm;
-            let r_tune: [f64; 8] = std::array::from_fn(|i| sm.ln_r_tune[i].exp());
+            let r_tune: [f64; 8] = std::array::from_fn(|i| fexp(sm.ln_r_tune[i]));
             let dc = DelayControls {
-                r_time_k: [sm.ln_time[0].exp(), sm.ln_time[1].exp()],
+                r_time_k: [fexp(sm.ln_time[0]), fexp(sm.ln_time[1])],
                 mod_depth: sm.dmod,
                 fb: sm.fb,
                 mix: sm.dmix,
             };
             // Slow oscillators: Hyper LFO (≤ 40 Hz) and the vibrato bank.
-            self.lfo.step(sm.ln_lfo_r[0].exp(), sm.ln_lfo_r[1].exp(), c.link, lfo_mode, dt_h);
+            self.lfo.step(fexp(sm.ln_lfo_r[0]), fexp(sm.ln_lfo_r[1]), c.link, lfo_mode, dt_h);
             self.vib.step(c.vibrato, dt_h);
             let lfo_dly = if c.dly_square { self.lfo.square } else { self.lfo.tri };
             // Sensors and envelopes.
@@ -385,6 +398,21 @@ impl Engine {
                 let tremor = 1.0 + 0.9 * noise * self.tremor[i].lp(self.rng.gauss());
                 let g = self.g_skin[i] * tremor.max(0.0);
                 self.voices[i].envelope(g, c.fast[i / 2], sm.hold[i / 4], dt_h);
+            }
+            let fm_k: [f64; 8] = std::array::from_fn(|i| sm.fm[i / 2] * g_fm[i]);
+            for i in 0..8 {
+                let inp = VoiceInputs {
+                    r_tune: r_tune[i],
+                    pitch_k: sm.pitch[i / 4],
+                    i_slow: self.vib.out[i] * g_vib[i],
+                    g_fm: fm_k[i] * 0.03,
+                    sharp: sm.sharp[i / 2],
+                    vdd: VDD,
+                    r_on: r_on_12,
+                    drift_pole,
+                    drift_gain,
+                };
+                self.voices[i].prepare(&inp, dt, &mut self.rng);
             }
             let ext_now = ext.map_or(0.0, |e| f64::from(e[n])) * c.ext_gain;
             let mut y_host = 0.0;
@@ -423,24 +451,11 @@ impl Engine {
                         ModSrc::Voices => self.pair_out[fm_src[p]],
                         ModSrc::Lfo => lfo_cv,
                     };
-                    let depth = sm.fm[p];
                     let vt_off = sag * 0.5
                         + spikes[g]
                         + 0.3 * spikes[1 - g]
                         + self.rng.gauss() * vt_noise;
-                    let inp = VoiceInputs {
-                        r_tune: r_tune[i],
-                        pitch_k: sm.pitch[g],
-                        i_fm: depth * v_src / r_fm[i],
-                        g_fm: depth * 0.03 / r_fm[i],
-                        v_vib: self.vib.out[i],
-                        vib_r_scale: vib_scale[i],
-                        sharp: sm.sharp[p],
-                        vdd: VDD,
-                        r_on: r_on_12,
-                        vt_offset: vt_off,
-                    };
-                    let v = self.voices[i].step(&inp, dt, &mut self.rng, noise);
+                    let v = self.voices[i].step(fm_k[i] * v_src, vt_off, dt);
                     pair_sum[p] += v;
                     bleed += self.voices[i].bleed;
                     let e = self.voices[i].last.edges;
@@ -539,16 +554,17 @@ pub fn measure_voice_freq(serial: u32, idx: usize, tune: f64, pitch: f64) -> f64
     let inp = VoiceInputs {
         r_tune: tune_r(tune),
         pitch_k: pitch_k(pitch),
-        vib_r_scale: 1.0,
         vdd: VDD,
         r_on: super::schmitt::r_on(VDD),
+        drift_pole: 1.0,
         ..Default::default()
     };
     let dt = 1.0 / fs;
     // Settle: envelope up and the oscillator running.
     for _ in 0..(fs * 0.3) as usize {
         v.envelope(1.0 / 60e3, false, 0.0, dt);
-        v.step(&inp, dt, &mut rng, 0.0);
+        v.prepare(&inp, dt, &mut rng);
+        v.step(0.0, 0.0, dt);
     }
     let mut first = None;
     let mut last = 0usize;
@@ -556,7 +572,8 @@ pub fn measure_voice_freq(serial: u32, idx: usize, tune: f64, pitch: f64) -> f64
     let max = (fs * 4.0) as usize;
     for k in 0..max {
         v.envelope(1.0 / 60e3, false, 0.0, dt);
-        v.step(&inp, dt, &mut rng, 0.0);
+        v.prepare(&inp, dt, &mut rng);
+        v.step(0.0, 0.0, dt);
         if v.last.edges > 0 {
             if first.is_none() {
                 first = Some(k);
@@ -588,4 +605,48 @@ pub fn tune_for(serial: u32, idx: usize, target: f64, pitch: f64) -> f64 {
         }
     }
     0.5 * (lo + hi)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Knobs resting at zero must settle exactly, not decay into subnormals
+    /// (which are ruinously slow on x86).
+    #[test]
+    fn smoothers_settle_without_subnormals() {
+        let mut e = Engine::new(48_000.0, 424);
+        let mut c = Controls::default();
+        let mut buf = [0.0f32; 480];
+        c.sharp = [0.7; 4];
+        c.drive = 0.5;
+        c.dist_mix = 0.5;
+        c.dly_mod = [0.5; 2];
+        e.process(&c, None, &mut buf);
+        c.sharp = [0.0; 4];
+        c.drive = 0.0;
+        c.dist_mix = 0.0;
+        c.dly_mod = [0.0; 2];
+        c.fb = 0.0;
+        for _ in 0..3000 {
+            e.process(&c, None, &mut buf);
+        }
+        let s = e.sm;
+        let all = s.sharp.iter().chain(&s.fm).chain(&s.dmod).chain(&s.hold).chain([&s.fb, &s.drive, &s.dist_mix]);
+        for v in all {
+            assert!(*v == 0.0, "smoother stuck at {v:e}");
+        }
+    }
+
+    #[test]
+    fn fast_exp_matches_libm() {
+        let mut worst = 0.0f64;
+        let mut x = -40.0;
+        while x < 40.0 {
+            let (a, b) = (crate::dsp::fexp(x), x.exp());
+            worst = worst.max(((a - b) / b).abs());
+            x += 0.001_37;
+        }
+        assert!(worst < 4e-16, "worst relative error {worst:e}");
+    }
 }

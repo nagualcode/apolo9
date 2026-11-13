@@ -47,9 +47,14 @@ fn main() {
     let mut all = Vec::with_capacity(n);
     let start = std::time::Instant::now();
     let mut t = 0usize;
+    // APOLO9_NOISE=0 makes renders deterministic (for null tests).
+    let noise_override: Option<f64> = std::env::var("APOLO9_NOISE").ok().and_then(|v| v.parse().ok());
     while t < n {
         let time = t as f64 / fs;
         script(&scenario, time, &mut c, &mut engine);
+        if let Some(v) = noise_override {
+            c.noise = v;
+        }
         let len = block.min(n - t);
         engine.process(&c, None, &mut buf[..len]);
         all.extend_from_slice(&buf[..len]);

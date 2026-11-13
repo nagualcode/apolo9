@@ -89,11 +89,21 @@ impl Decimator {
         }
         self.phase = 0;
         let window = &self.hist[self.pos..self.pos + n];
-        let mut acc = 0.0;
-        for (h, t) in window.iter().zip(self.taps.iter().rev()) {
-            acc += h * t;
+        // The taps are symmetric, so no reversal is needed. Four partial
+        // sums let the compiler vectorise the dot product.
+        let mut acc = [0.0f64; 4];
+        let (wc, wr) = (window.chunks_exact(4), self.taps.chunks_exact(4));
+        let (wt, tt) = (wc.remainder(), wr.remainder());
+        for (h, t) in wc.zip(wr) {
+            for j in 0..4 {
+                acc[j] += h[j] * t[j];
+            }
         }
-        Some(acc)
+        let mut tail = 0.0;
+        for (h, t) in wt.iter().zip(tt) {
+            tail += h * t;
+        }
+        Some((acc[0] + acc[1]) + (acc[2] + acc[3]) + tail)
     }
 
     pub fn reset(&mut self) {

@@ -24,6 +24,11 @@ pub struct Distortion {
     low: Svf,
     high: Svf,
     hp: Rc,
+    /// Knob-dependent gains, recomputed only when a knob moves.
+    key: (f64, f64),
+    g1: f64,
+    g2: f64,
+    g_vol: f64,
 }
 
 impl Distortion {
@@ -36,6 +41,10 @@ impl Distortion {
             low: Svf::default(),
             high: Svf::default(),
             hp: Rc::default(),
+            key: (f64::NAN, f64::NAN),
+            g1: 0.0,
+            g2: 0.0,
+            g_vol: 0.0,
         };
         d.set_fs(fs);
         d
@@ -66,17 +75,21 @@ impl Distortion {
     /// Returns (output volts, total-feedback tap volts).
     #[inline]
     pub fn process(&mut self, x: f64, drive: f64, mix: f64, vol: f64) -> (f64, f64) {
-        // Stage 1: gain 1 + 91k / (1k + 100k·A(1-d)), cap across the 91 k.
-        let rg1 = 1e3 + 100e3 * taper_a(1.0 - drive);
-        let g1 = 91e3 / rg1;
+        if self.key != (drive, vol) {
+            self.key = (drive, vol);
+            // Stage 1: gain 1 + 91k / (1k + 100k·A(1-d)), cap across the 91 k.
+            self.g1 = 91e3 / (1e3 + 100e3 * taper_a(1.0 - drive));
+            // Stage 2: gain 1 + 30k / (10k + 90k·(1-d)).
+            self.g2 = 30e3 / (10e3 + 90e3 * (1.0 - drive));
+            self.g_vol = taper_a(vol) * 4.0;
+        }
+        let (g1, g2) = (self.g1, self.g2);
         let mut s1 = x + g1 * self.lp1.lp(x);
         if x < OPAMP_LO * 1.08 && drive > 0.85 {
             // TL07x phase reversal (input below common-mode range).
             s1 = 10.0;
         }
         let s1 = opamp_rail(s1);
-        // Stage 2: gain 1 + 30k / (10k + 90k·(1-d)).
-        let g2 = 30e3 / (10e3 + 90e3 * (1.0 - drive));
         let s2 = opamp_rail(s1 + g2 * self.lp2.lp(s1));
         // Back-to-back 10 V zeners never conduct inside the op-amp swing;
         // what is left is the RC and the coupling cap.
@@ -93,7 +106,7 @@ impl Distortion {
         let tap = eq;
         // Last buffer, then the divider that sets the 2 V 0-to-peak spec
         // (the output never exceeds ≈ 1.9 V however hard it is driven).
-        let out = opamp_rail(eq * taper_a(vol) * 4.0) * 0.40;
+        let out = opamp_rail(eq * self.g_vol) * 0.40;
         (out, tap)
     }
 }

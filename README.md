@@ -82,6 +82,10 @@ without a host.
 
 ## The panel, explained
 
+Knobs turn with a vertical drag (hold Shift for fine moves). The toggle switches flick the
+same way: swipe up or down on a switch, or on its legend, and the lever follows one position
+per notch. A click works too.
+
 ### The sensors (bottom row)
 
 Each sensor is two copper plates. On the hardware you bridge them with a finger; here you

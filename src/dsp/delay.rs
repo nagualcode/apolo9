@@ -15,7 +15,7 @@
 //! stage with a 1N4148 limiter (the four diodes next to MIX DRY on the
 //! board), so self-oscillation settles into bounded standing waves.
 
-use super::{Rc, Svf, sane, soft_clip_asym};
+use super::{Rc, Svf, fexp, sane, soft_clip_asym};
 
 /// RAM size of the PT2399.
 pub const BITS: usize = 44_000;
@@ -258,9 +258,13 @@ impl ModDelay {
 /// ±1.2 V, with the slight mismatch of real diodes.
 #[inline]
 fn diode_limit(v: f64) -> f64 {
-    if v >= 0.0 {
-        1.22 * (v / 1.22).tanh()
+    let (a, inv) = if v >= 0.0 { (1.22, 1.0 / 1.22) } else { (1.16, 1.0 / 1.16) };
+    let x = v * inv;
+    if x.abs() < 1e-3 {
+        // tanh x = x - x³/3 (the exponential form cancels here).
+        a * x * (1.0 - x * x * (1.0 / 3.0))
     } else {
-        1.16 * (v / 1.16).tanh()
+        let e = fexp(2.0 * x.clamp(-20.0, 20.0));
+        a * (e - 1.0) / (e + 1.0)
     }
 }
